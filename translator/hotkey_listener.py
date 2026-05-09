@@ -100,20 +100,134 @@ def get_selected_text_direct():
     return None
 
 
-_NON_TEXT_CLASSES = {
-    "progman", "workerw", "shell_traywnd",
-    "cabinetwclass", "explorewclass", "shelldll_defview",
-    "button", "static", "scrollbar", "toolbarwindow32",
-    "syslistview32", "sysheader32", "msctls_statusbar32",
-    "#32768", "#32770", "desktopbackgroundclass",
-}
+def _uia_walk_tree(root, max_nodes=500):
+    if not root:
+        return
+    to_visit = [root]
+    visited = 0
+    while to_visit and visited < max_nodes:
+        control = to_visit.pop(0)
+        visited += 1
+        yield control
+        try:
+            to_visit.extend(control.GetChildren())
+        except Exception:
+            pass
 
 
-def is_text_window(hwnd):
-    user32 = ctypes.windll.user32
-    buf = ctypes.create_unicode_buffer(64)
-    user32.GetClassNameW(hwnd, buf, 64)
-    return buf.value.lower() not in _NON_TEXT_CLASSES
+def _uia_has_text_selection():
+    try:
+        import uiautomation as auto
+    except ImportError:
+        return True
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
+        return True
+    try:
+        fg = user32.GetForegroundWindow()
+        if not fg:
+            return False
+        root = auto.ControlFromHandle(fg)
+        if not root:
+            return False
+        for control in _uia_walk_tree(root):
+            if _uia_check_text_selection(control):
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def _uia_check_text_selection(control):
+    if not control:
+        return False
+    try:
+        tp = control.GetTextPattern()
+    except Exception:
+        return False
+    if not tp:
+        return False
+    try:
+        ranges = tp.GetSelection()
+    except Exception:
+        return False
+    if not ranges:
+        return False
+    for r in ranges:
+        try:
+            txt = r.GetText(-1)
+            if txt and txt.strip():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def _uia_get_selected_text():
+    try:
+        import uiautomation as auto
+    except ImportError:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+    except Exception:
+        return None
+    try:
+        fg = user32.GetForegroundWindow()
+        if not fg:
+            return None
+        root = auto.ControlFromHandle(fg)
+        if not root:
+            return None
+        for control in _uia_walk_tree(root):
+            text = _uia_read_selection(control)
+            if text:
+                return text
+    except Exception:
+        pass
+    return None
+
+
+def _uia_read_selection(control):
+    if not control:
+        return None
+    try:
+        tp = control.GetTextPattern()
+    except Exception:
+        return None
+    if not tp:
+        return None
+    try:
+        ranges = tp.GetSelection()
+    except Exception:
+        return None
+    if not ranges:
+        return None
+    for r in ranges:
+        try:
+            txt = r.GetText(-1)
+            if txt and txt.strip():
+                return txt.strip()
+        except Exception:
+            continue
+    return None
+
+
+def get_valid_selection_text():
+    text = get_selected_text_direct()
+    if text and text.strip():
+        clean = text.strip()
+        if len(clean) >= 2:
+            if len(clean) > 500:
+                clean = clean[:500] + "\u2026"
+            return clean
+    uia_text = _uia_get_selected_text()
+    if uia_text and len(uia_text) >= 2:
+        if len(uia_text) > 500:
+            uia_text = uia_text[:500] + "\u2026"
+        return uia_text
+    return None
 
 
 def simulate_ctrl_c():
@@ -161,7 +275,6 @@ class FloatingTranslateButton(QWidget):
         self._hide_timer.setSingleShot(True)
         self._hide_timer.timeout.connect(self.hide)
 
-        self._selected_text = ""
         self._busy = False
         self._button_center = None
         self._source_hwnd = None
@@ -182,20 +295,11 @@ class FloatingTranslateButton(QWidget):
         self.hide()
         self._busy = True
 
-        if self._selected_text:
+        text = get_valid_selection_text()
+        if text:
             self._busy = False
-            self.clicked.emit(self._selected_text)
+            self.clicked.emit(text)
             return
-
-        text = get_selected_text_direct()
-        if text and text.strip():
-            clean = text.strip()
-            if len(clean) >= 2:
-                self._busy = False
-                if len(clean) > 500:
-                    clean = clean[:500] + "\u2026"
-                self.clicked.emit(clean)
-                return
 
         QTimer.singleShot(30, self._activate_and_copy)
 
@@ -331,20 +435,13 @@ class SelectionMonitor:
 
         text = get_selected_text_direct()
         if text is None:
-            if not is_text_window(current_hwnd):
+            if not _uia_has_text_selection():
                 return
-            btn._selected_text = ""
             btn.show_at(x, y, current_hwnd)
             return
 
         if text and text.strip():
-            clean = text.strip()
-            if len(clean) >= 2:
-                if len(clean) > 500:
-                    clean = clean[:500] + "\u2026"
-                btn._selected_text = clean
-                btn.show_at(x, y, current_hwnd)
-                return
+            btn.show_at(x, y, current_hwnd)
 
     def _on_translate(self, text):
         if not text:
